@@ -1,0 +1,39 @@
+# https://taskfile.dev
+
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  setup:
+    desc: Make all scripts executable
+    cmds:
+      - chmod +x *.sh *.py
+
+  storage:logs:
+    desc: Log file disk usage per container, largest first
+    cmds:
+      - ./storage-logs.sh
+
+  storage:volumes:
+    desc: Volume disk usage per container, largest first
+    cmds:
+      - ./storage-volumes.sh
+
+  network:list:
+    desc: Table of networks with subnet, gateway, driver, container count
+    cmds:
+      - ./network-list.py
+
+  network:pick-subnet:
+    desc: Find a free subnet and print a Compose template (args after --)
+    cmds:
+      - ./network-pick-subnet.py {{.CLI_ARGS}}
+
+  container:runtimes:
+    desc: Runtime (runsc/gVisor or default) of each running container
+    cmds:
+      - ./container-runtimes.py
