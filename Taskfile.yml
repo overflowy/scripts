@@ -1,0 +1,16 @@
+# https://taskfile.dev
+
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  update:
+    desc: Pull the repo and overwrite all local changes
+    cmds:
+      - git fetch origin
+      - git reset --hard origin/main
+      - git clean -fd
