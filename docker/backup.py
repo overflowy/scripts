@@ -16,6 +16,8 @@ Layout: destination/<container>/sqlite/<name>_<date>_<time>_<crc32>.sqlite
 
 A backup whose checksum matches the newest existing one is dropped and
 consumes no keep slot. The container is restarted only if it was running.
+When the sqlite db is the only file in the volume, the data tarball is
+skipped since it would only duplicate the sqlite backup.
 """
 
 import fcntl
@@ -71,6 +73,21 @@ def manifest_crc(root: Path) -> int:
                 crc = zlib.crc32(st.st_size.to_bytes(8, "big"), crc)
                 crc = crc_update_file(crc, path)
     return crc
+
+
+def sole_file(root: Path) -> Path | None:
+    """The only regular file in the tree, or None if the tree holds anything else."""
+    found = None
+    for dirpath, dirnames, filenames in os.walk(root, onerror=raise_walk_error):
+        for name in dirnames:
+            if (Path(dirpath) / name).is_symlink():
+                return None
+        for name in filenames:
+            path = Path(dirpath) / name
+            if found is not None or path.is_symlink() or not path.is_file():
+                return None
+            found = path
+    return found
 
 
 def existing_backups(directory: Path, stem: str, suffix: str) -> list[tuple[str, str, Path]]:
@@ -221,6 +238,7 @@ def process(entry: dict, destination: Path) -> bool:
         docker("stop", container)
         if was_running:
             print(f"{tag} stopped")
+        sqlite_src = None
         if "sqlite" in entry:
             try:
                 src = (vol_resolved / entry["sqlite"]).resolve()
@@ -230,12 +248,16 @@ def process(entry: dict, destination: Path) -> bool:
                     destination / container / "sqlite", dest_resolved, vol_resolved
                 )
                 backup_sqlite(src, sqlite_dir, keep, tag)
+                sqlite_src = src
             except Exception as e:  # noqa: BLE001
                 print(f"{tag} sqlite backup failed: {e}", file=sys.stderr)
                 ok = False
         try:
-            data_dir = output_dir(destination / container / "data", dest_resolved, vol_resolved)
-            backup_volume(vol_resolved, data_dir, keep, tag)
+            if sqlite_src is not None and sole_file(vol_resolved) == sqlite_src:
+                print(f"{tag} volume holds only the sqlite db, data backup skipped")
+            else:
+                data_dir = output_dir(destination / container / "data", dest_resolved, vol_resolved)
+                backup_volume(vol_resolved, data_dir, keep, tag)
         except Exception as e:  # noqa: BLE001
             print(f"{tag} volume backup failed: {e}", file=sys.stderr)
             ok = False
