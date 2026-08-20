@@ -11,6 +11,24 @@ volume = "/var/lib/docker/volumes/gitea/_data"       # host path of the volume
 keep = 5                                             # backups to keep per kind
 sqlite = "gitea/gitea.db"                            # optional, relative to volume
 stop_timeout = 60                                    # optional, seconds before docker stop kills
+name = "gitea"                                       # optional, backup subfolder; must be unique
+                                                     # per entry (default: container/service name)
+
+[[backup]]
+service = "auth-postgres"                            # swarm service: scaled to 0 replicas and
+volume = "/var/lib/docker/volumes/auth-pg/_data"     # back instead of container stop/start;
+keep = 5                                             # stop_timeout does not apply (swarm uses
+                                                     # the service's stop grace period)
+
+[[backup]]
+container = "crowdsec"                               # several volumes, one stop/start cycle:
+[[backup.volumes]]                                   # volume/sqlite/name move into
+volume = "/var/lib/docker/volumes/crowdsec-db/_data" # [[backup.volumes]] sub-tables, with a
+sqlite = "crowdsec.db"                               # unique name per volume
+name = "crowdsec-db"
+[[backup.volumes]]
+volume = "/var/lib/docker/volumes/crowdsec-config/_data"
+name = "crowdsec-config"
 
 Layout: destination/<container>/sqlite/<name>_<date>_<time>_<crc32>.sqlite
         destination/<container>/data/data_<date>_<time>_<crc32>.tar.gz
@@ -241,64 +259,121 @@ def docker(*argv: str) -> str:
     return proc.stdout.strip()
 
 
+def wait_service_stopped(service: str, timeout: float = 300) -> None:
+    """Wait until no container of the service is left running."""
+    deadline = time.monotonic() + timeout
+    while docker("ps", "-q", "--filter", f"label=com.docker.swarm.service.name={service}"):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"service {service} still has running containers after {timeout}s")
+        time.sleep(2)
+
+
 def process(entry: dict, destination: Path) -> bool:
-    container = entry["container"]
-    volume = Path(entry["volume"])
+    is_service = "service" in entry
+    name = entry["service"] if is_service else entry["container"]
     keep = entry.get("keep", DEFAULT_KEEP)
     stop_timeout = entry.get("stop_timeout", DEFAULT_STOP_TIMEOUT)
-    tag = f"[{container}]"
+    tag = f"[{name}]"
+    if is_service and "container" in entry:
+        print(f"{tag} set either container or service, not both", file=sys.stderr)
+        return False
+    if ("volumes" in entry) == ("volume" in entry):
+        print(f"{tag} set exactly one of volume or volumes", file=sys.stderr)
+        return False
     if type(keep) is not int or keep < 1:
         print(f"{tag} keep must be an integer >= 1, got {keep!r}", file=sys.stderr)
         return False
     if type(stop_timeout) is not int or stop_timeout < 0:
         print(f"{tag} stop_timeout must be an integer >= 0, got {stop_timeout!r}", file=sys.stderr)
         return False
-    if not volume.is_dir():
-        print(f"{tag} volume path not found: {volume}", file=sys.stderr)
-        return False
     dest_resolved = destination.resolve()
-    vol_resolved = volume.resolve()
-    if dest_resolved.is_relative_to(vol_resolved) or vol_resolved.is_relative_to(dest_resolved):
-        print(f"{tag} destination and volume must not contain each other", file=sys.stderr)
-        return False
+    specs = []
+    for raw in entry.get("volumes", [entry]):
+        if not isinstance(raw, dict) or "volume" not in raw:
+            print(f"{tag} each volumes entry needs a volume path", file=sys.stderr)
+            return False
+        folder = raw.get("name", name)
+        if type(folder) is not str or not folder or folder != Path(folder).name:
+            print(f"{tag} name must be a plain folder name, got {folder!r}", file=sys.stderr)
+            return False
+        if any(folder == s[0] for s in specs):
+            print(f"{tag} duplicate backup folder name: {folder}", file=sys.stderr)
+            return False
+        volume = Path(raw["volume"])
+        if not volume.is_dir():
+            print(f"{tag} volume path not found: {volume}", file=sys.stderr)
+            return False
+        vol_resolved = volume.resolve()
+        if dest_resolved.is_relative_to(vol_resolved) or vol_resolved.is_relative_to(dest_resolved):
+            print(f"{tag} destination and volume must not contain each other", file=sys.stderr)
+            return False
+        specs.append((folder, vol_resolved, raw.get("sqlite")))
     ok = True
-    status = docker("inspect", "--format", "{{.State.Status}}", container)
-    if status == "paused":
-        print(f"{tag} container is paused, skipping", file=sys.stderr)
-        return False
-    was_running = status in ("running", "restarting")
+    if is_service:
+        replicas = docker(
+            "service", "inspect", "--format", "{{.Spec.Mode.Replicated.Replicas}}", name
+        )
+        if not replicas.isdigit():
+            print(f"{tag} only replicated swarm services are supported", file=sys.stderr)
+            return False
+        was_running = int(replicas) > 0
+
+        def stop() -> None:
+            docker("service", "scale", "--detach=false", f"{name}=0")
+            wait_service_stopped(name)
+
+        def start() -> None:
+            docker("service", "scale", "--detach=false", f"{name}={replicas}")
+
+    else:
+        status = docker("inspect", "--format", "{{.State.Status}}", name)
+        if status == "paused":
+            print(f"{tag} container is paused, skipping", file=sys.stderr)
+            return False
+        was_running = status in ("running", "restarting")
+
+        def stop() -> None:
+            docker("stop", "-t", str(stop_timeout), name)
+
+        def start() -> None:
+            docker("start", name)
+
     try:
-        docker("stop", "-t", str(stop_timeout), container)
+        stop()
         if was_running:
             print(f"{tag} stopped")
-        sqlite_src = None
-        if "sqlite" in entry:
+        for folder, vol_resolved, sqlite_rel in specs:
+            vtag = f"[{folder}]"
+            sqlite_src = None
+            if sqlite_rel is not None:
+                try:
+                    src = (vol_resolved / sqlite_rel).resolve()
+                    if not src.is_relative_to(vol_resolved):
+                        raise RuntimeError(f"sqlite path escapes the volume: {sqlite_rel}")
+                    sqlite_dir = output_dir(
+                        destination / folder / "sqlite", dest_resolved, vol_resolved
+                    )
+                    backup_sqlite(src, sqlite_dir, keep, vtag)
+                    sqlite_src = src
+                except Exception as e:  # noqa: BLE001
+                    print(f"{vtag} sqlite backup failed: {e}", file=sys.stderr)
+                    ok = False
             try:
-                src = (vol_resolved / entry["sqlite"]).resolve()
-                if not src.is_relative_to(vol_resolved):
-                    raise RuntimeError(f"sqlite path escapes the volume: {entry['sqlite']}")
-                sqlite_dir = output_dir(
-                    destination / container / "sqlite", dest_resolved, vol_resolved
-                )
-                backup_sqlite(src, sqlite_dir, keep, tag)
-                sqlite_src = src
+                if sqlite_src is not None and sole_file(vol_resolved) == sqlite_src:
+                    print(f"{vtag} volume holds only the sqlite db, data backup skipped")
+                else:
+                    data_dir = output_dir(
+                        destination / folder / "data", dest_resolved, vol_resolved
+                    )
+                    backup_volume(vol_resolved, data_dir, keep, vtag)
             except Exception as e:  # noqa: BLE001
-                print(f"{tag} sqlite backup failed: {e}", file=sys.stderr)
+                print(f"{vtag} volume backup failed: {e}", file=sys.stderr)
                 ok = False
-        try:
-            if sqlite_src is not None and sole_file(vol_resolved) == sqlite_src:
-                print(f"{tag} volume holds only the sqlite db, data backup skipped")
-            else:
-                data_dir = output_dir(destination / container / "data", dest_resolved, vol_resolved)
-                backup_volume(vol_resolved, data_dir, keep, tag)
-        except Exception as e:  # noqa: BLE001
-            print(f"{tag} volume backup failed: {e}", file=sys.stderr)
-            ok = False
     finally:
         if was_running:
             for delay in (5, 10, 20, 40, None):
                 try:
-                    docker("start", container)
+                    start()
                     print(f"{tag} started")
                     break
                 except Exception:
@@ -339,7 +414,9 @@ def main() -> int:
                         if not process(entry, destination):
                             failed += 1
                     except Exception as e:  # noqa: BLE001
-                        name = entry.get("container", "?") if isinstance(entry, dict) else "?"
+                        name = "?"
+                        if isinstance(entry, dict):
+                            name = entry.get("container") or entry.get("service") or "?"
                         print(f"[{name}] failed: {e}", file=sys.stderr)
                         failed += 1
                 if term:
