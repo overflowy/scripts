@@ -38,6 +38,11 @@ tasks:
     cmds:
       - ./network-pick-subnet.py {{.CLI_ARGS}}
 
+  container:volumes:
+    desc: Tree of mounts and files per container (args after --, e.g. -d 3)
+    cmds:
+      - ./container-volumes.py {{.CLI_ARGS}}
+
   container:runtimes:
     desc: Runtime (runsc/gVisor or default) of each running container
     cmds:
