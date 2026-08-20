@@ -11,3 +11,8 @@ container = "readeck"
 volume = "/var/lib/docker/volumes/default-readeck-garlke_readeck-data/_data"
 keep = 5
 sqlite = "data/db.sqlite3"
+
+[[backup]]
+container = "default-miniflux-tsr8sg-db-1"
+volume = "/var/lib/docker/volumes/default-miniflux-tsr8sg_miniflux-db/_data"
+keep = 5
