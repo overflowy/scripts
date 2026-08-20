@@ -10,6 +10,7 @@ container = "gitea"                                  # container to stop during 
 volume = "/var/lib/docker/volumes/gitea/_data"       # host path of the volume
 keep = 5                                             # backups to keep per kind
 sqlite = "gitea/gitea.db"                            # optional, relative to volume
+stop_timeout = 60                                    # optional, seconds before docker stop kills
 
 Layout: destination/<container>/sqlite/<name>_<date>_<time>_<crc32>.sqlite
         destination/<container>/data/data_<date>_<time>_<crc32>.tar.gz
@@ -37,6 +38,7 @@ import tomllib
 
 TIME_FMT = "%Y%m%d_%H%M%S"
 DEFAULT_KEEP = 5
+DEFAULT_STOP_TIMEOUT = 60
 
 
 def crc_update_file(crc: int, path: Path) -> int:
@@ -216,9 +218,13 @@ def process(entry: dict, destination: Path) -> bool:
     container = entry["container"]
     volume = Path(entry["volume"])
     keep = entry.get("keep", DEFAULT_KEEP)
+    stop_timeout = entry.get("stop_timeout", DEFAULT_STOP_TIMEOUT)
     tag = f"[{container}]"
     if type(keep) is not int or keep < 1:
         print(f"{tag} keep must be an integer >= 1, got {keep!r}", file=sys.stderr)
+        return False
+    if type(stop_timeout) is not int or stop_timeout < 0:
+        print(f"{tag} stop_timeout must be an integer >= 0, got {stop_timeout!r}", file=sys.stderr)
         return False
     if not volume.is_dir():
         print(f"{tag} volume path not found: {volume}", file=sys.stderr)
@@ -235,7 +241,7 @@ def process(entry: dict, destination: Path) -> bool:
         return False
     was_running = status in ("running", "restarting")
     try:
-        docker("stop", container)
+        docker("stop", "-t", str(stop_timeout), container)
         if was_running:
             print(f"{tag} stopped")
         sqlite_src = None
