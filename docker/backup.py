@@ -37,8 +37,35 @@ from pathlib import Path
 import tomllib
 
 TIME_FMT = "%Y%m%d_%H%M%S"
+LOG_TIME_FMT = "%Y-%m-%d %H:%M:%S UTC"
 DEFAULT_KEEP = 5
 DEFAULT_STOP_TIMEOUT = 60
+
+
+class Tee:
+    """Write-through to a console stream and the log file."""
+
+    def __init__(self, stream, log_file):
+        self.stream = stream
+        self.log_file = log_file
+
+    def write(self, data: str) -> None:
+        self.stream.write(data)
+        self.log_file.write(data)
+
+    def flush(self) -> None:
+        self.stream.flush()
+        self.log_file.flush()
+
+
+def fmt_duration(seconds: float) -> str:
+    m, s = divmod(round(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
 
 
 def crc_update_file(crc: int, path: Path) -> int:
@@ -298,21 +325,35 @@ def main() -> int:
         config = tomllib.load(config_file)
         destination = Path(config["destination"])
         destination.mkdir(parents=True, exist_ok=True)
-        failed = 0
-        for entry in config.get("backup", []):
-            if term:
-                break
+        started = time.monotonic()
+        with open(destination / "backup.log", "a", encoding="utf-8", buffering=1) as log_file:
+            log_file.write(f"--- start {datetime.now(timezone.utc):{LOG_TIME_FMT}} ---\n")
+            orig_out, orig_err = sys.stdout, sys.stderr
+            sys.stdout, sys.stderr = Tee(orig_out, log_file), Tee(orig_err, log_file)
             try:
-                if not process(entry, destination):
-                    failed += 1
-            except Exception as e:  # noqa: BLE001
-                name = entry.get("container", "?") if isinstance(entry, dict) else "?"
-                print(f"[{name}] failed: {e}", file=sys.stderr)
-                failed += 1
-        if term:
-            print("terminated by SIGTERM after finishing the current entry", file=sys.stderr)
-            return 143
-        return 1 if failed else 0
+                failed = 0
+                for entry in config.get("backup", []):
+                    if term:
+                        break
+                    try:
+                        if not process(entry, destination):
+                            failed += 1
+                    except Exception as e:  # noqa: BLE001
+                        name = entry.get("container", "?") if isinstance(entry, dict) else "?"
+                        print(f"[{name}] failed: {e}", file=sys.stderr)
+                        failed += 1
+                if term:
+                    print(
+                        "terminated by SIGTERM after finishing the current entry", file=sys.stderr
+                    )
+                    return 143
+                return 1 if failed else 0
+            finally:
+                sys.stdout, sys.stderr = orig_out, orig_err
+                log_file.write(
+                    f"--- stop {datetime.now(timezone.utc):{LOG_TIME_FMT}}"
+                    f" - took: {fmt_duration(time.monotonic() - started)} ---\n"
+                )
 
 
 if __name__ == "__main__":
