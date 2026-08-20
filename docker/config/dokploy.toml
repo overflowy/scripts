@@ -10,6 +10,7 @@ container = "sara-kv-jjjwil-app-1"
 volume = "/var/lib/docker/volumes/sara-kv-jjjwil_app-data/_data"
 keep = 10
 sqlite = "db.sqlite3"
+data = false
 
 [[backup]]
 container = "vaultwarden"
@@ -35,3 +36,4 @@ container = "uptime-kuma"
 volume = "/var/lib/docker/volumes/monitoring-uptimekuma-rvtafy_uptime-kuma/_data"
 keep = 2
 sqlite = "kuma.db"
+data = false

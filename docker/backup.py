@@ -16,6 +16,8 @@ sqlite = "gitea/gitea.db"                            # optional, relative to vol
 stop_timeout = 60                                    # optional, seconds before docker stop kills
 name = "gitea"                                       # optional, backup subfolder; must be unique
                                                      # per entry (default: container/service name)
+data = false                                         # optional, skip the volume tarball and back
+                                                     # up only the sqlite db (default: true)
 
 [[backup]]
 service = "auth-postgres"                            # swarm service: scaled to 0 replicas and
@@ -38,8 +40,6 @@ Layout: destination/<container>/sqlite/<name>_<date>_<time>_<crc32>.sqlite
 
 A backup whose checksum matches the newest existing one is dropped and
 consumes no keep slot. The container is restarted only if it was running.
-When the sqlite db is the only file in the volume, the data tarball is
-skipped since it would only duplicate the sqlite backup.
 """
 
 import fcntl
@@ -123,21 +123,6 @@ def manifest_crc(root: Path) -> int:
                 crc = zlib.crc32(st.st_size.to_bytes(8, "big"), crc)
                 crc = crc_update_file(crc, path)
     return crc
-
-
-def sole_file(root: Path) -> Path | None:
-    """The only regular file in the tree, or None if the tree holds anything else."""
-    found = None
-    for dirpath, dirnames, filenames in os.walk(root, onerror=raise_walk_error):
-        for name in dirnames:
-            if (Path(dirpath) / name).is_symlink():
-                return None
-        for name in filenames:
-            path = Path(dirpath) / name
-            if found is not None or path.is_symlink() or not path.is_file():
-                return None
-            found = path
-    return found
 
 
 def existing_backups(directory: Path, stem: str, suffix: str) -> list[tuple[str, str, Path]]:
@@ -310,7 +295,14 @@ def process(entry: dict, destination: Path) -> bool:
         if dest_resolved.is_relative_to(vol_resolved) or vol_resolved.is_relative_to(dest_resolved):
             print(f"{tag} destination and volume must not contain each other", file=sys.stderr)
             return False
-        specs.append((folder, vol_resolved, raw.get("sqlite")))
+        want_data = raw.get("data", True)
+        if type(want_data) is not bool:
+            print(f"{tag} data must be a boolean, got {want_data!r}", file=sys.stderr)
+            return False
+        if not want_data and "sqlite" not in raw:
+            print(f"{tag} data = false requires a sqlite path", file=sys.stderr)
+            return False
+        specs.append((folder, vol_resolved, raw.get("sqlite"), want_data))
     ok = True
     if is_service:
         replicas = docker(
@@ -345,9 +337,8 @@ def process(entry: dict, destination: Path) -> bool:
         stop()
         if was_running:
             print(f"{tag} stopped")
-        for folder, vol_resolved, sqlite_rel in specs:
+        for folder, vol_resolved, sqlite_rel, want_data in specs:
             vtag = f"[{folder}]"
-            sqlite_src = None
             if sqlite_rel is not None:
                 try:
                     src = (vol_resolved / sqlite_rel).resolve()
@@ -357,21 +348,18 @@ def process(entry: dict, destination: Path) -> bool:
                         destination / folder / "sqlite", dest_resolved, vol_resolved
                     )
                     backup_sqlite(src, sqlite_dir, keep, vtag)
-                    sqlite_src = src
                 except Exception as e:  # noqa: BLE001
                     print(f"{vtag} sqlite backup failed: {e}", file=sys.stderr)
                     ok = False
-            try:
-                if sqlite_src is not None and sole_file(vol_resolved) == sqlite_src:
-                    print(f"{vtag} volume holds only the sqlite db, data backup skipped")
-                else:
+            if want_data:
+                try:
                     data_dir = output_dir(
                         destination / folder / "data", dest_resolved, vol_resolved
                     )
                     backup_volume(vol_resolved, data_dir, keep, vtag)
-            except Exception as e:  # noqa: BLE001
-                print(f"{vtag} volume backup failed: {e}", file=sys.stderr)
-                ok = False
+                except Exception as e:  # noqa: BLE001
+                    print(f"{vtag} volume backup failed: {e}", file=sys.stderr)
+                    ok = False
     finally:
         if was_running:
             for delay in (5, 10, 20, 40, None):

@@ -5,6 +5,7 @@ container = "default-betula-k1pscr-betula-1"
 volume = "/var/lib/docker/volumes/default-betula-k1pscr_betula_data/_data"
 keep = 5
 sqlite = "links.betula"
+data = false
 
 [[backup]]
 container = "readeck"
