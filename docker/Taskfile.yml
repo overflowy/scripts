@@ -13,6 +13,11 @@ tasks:
     cmds:
       - chmod +x *.sh *.py
 
+  backup:
+    desc: Back up volumes per config/<name>.toml (task backup -- alma)
+    cmds:
+      - ./backup.py config/{{.CLI_ARGS}}.toml
+
   storage:logs:
     desc: Log file disk usage per container, largest first
     cmds:
